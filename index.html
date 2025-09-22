@@ -3,14 +3,36 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Embeddable Threaded Discussion Board (Firebase Edition)</title>
+  <title>Embeddable Threaded Discussion Board</title>
+  <!--
+  HOW TO USE / EMBED
+  ===================
+  Option A (single page): Open this file directly and the board will work with localStorage.
+  Option B (embed on any page):
+    1) Copy everything inside <div id="discussion-board"></div> (including the tag) and the <style> + <script> blocks into your page.
+    2) The board persists to localStorage in the browser. For production, wire the save/load calls to your backend.
+
+  Features
+  --------
+  - Main Topics → Subtopics → Threads (original post + replies)
+  - Required poster fields: first name, last name, city, state, email
+  - Client-side validation
+  - LocalStorage persistence (namespaced by window.location.host)
+  - Import/Export JSON (for backup or migration to a backend)
+  - Clean, responsive UI without external dependencies
+
+  Notes
+  -----
+  - Replies attach to the original post (one-level deep) for clarity and moderation.
+  - To harden for production: add server auth, spam protection, rate limits, and server-side validation.
+  -->
   <style>
     :root {
-      --bg:#000000;
+      --bg:#000000; /* black background */
       --panel:#111111;
       --muted:#aaaaaa;
       --text:#ffffff;
-      --acc:#C5A95E;
+      --acc:#C5A95E; /* gold highlight */
       --acc2:#C5A95E;
       --danger:#ff6b6b;
       --line:#333333;
@@ -19,7 +41,6 @@
     *{box-sizing:border-box}
     body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Helvetica,Arial,sans-serif}
     h1,h2,h3{margin:0 0 .25rem 0}
-    a{color:var(--acc)}
     .wrap{max-width:1200px;margin:0 auto;padding:20px}
 
     .board{display:grid;grid-template-columns:260px 300px 1fr;gap:16px}
@@ -73,9 +94,10 @@
 <body>
   <div class="wrap">
     <h1>Discussion Board</h1>
-    <p class="help">Main topics → subtopics → original post with replies. Shared globally via Firebase.</p>
+    <p class="help">Main topics → subtopics → original post with replies. Stored locally in your browser.</p>
 
     <div class="board">
+      <!-- Topics -->
       <div class="card" id="topicsCard">
         <div class="hd">
           <strong>Topics</strong>
@@ -86,6 +108,7 @@
         </div>
       </div>
 
+      <!-- Subtopics -->
       <div class="card" id="subtopicsCard">
         <div class="hd">
           <div class="toolbar">
@@ -99,6 +122,7 @@
         </div>
       </div>
 
+      <!-- Threads / Posts -->
       <div class="card" id="threadsCard">
         <div class="hd">
           <div class="toolbar">
@@ -107,7 +131,10 @@
           </div>
           <div class="row">
             <button class="btn" id="newThreadBtn">+ New Thread</button>
-            <button class="btn secondary" id="exportBtn" title="Export current subtopic to JSON">Export</button>
+            <button class="btn secondary" id="exportBtn">Export</button>
+            <label class="btn ghost" for="importInput" style="cursor:pointer">Import</label>
+            <input id="importInput" type="file" accept="application/json" style="display:none"/>
+            <button class="btn ghost" id="resetBtn" title="Clear all data">Reset</button>
           </div>
         </div>
         <div class="bd" id="threadsBody">
@@ -130,11 +157,12 @@
       <div class="author"></div>
       <div class="row" style="margin-top:8px">
         <button class="btn secondary replyBtn">Reply</button>
-        <button class="btn ghost delBtn" style="display:none">Delete</button>
+        <button class="btn ghost delBtn">Delete</button>
       </div>
     </div>
   </template>
 
+  <!-- Simple modal -->
   <div id="modal" style="position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:#0008;backdrop-filter:saturate(140%) blur(6px)">
     <div class="card" style="width:min(680px,92vw)">
       <div class="hd"><strong id="modalTitle">Modal</strong><button class="btn ghost" id="modalClose">Close</button></div>
@@ -142,34 +170,27 @@
     </div>
   </div>
 
-  <script type="module">
-    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
-    import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
-    import { getFirestore, collection, addDoc, getDocs, onSnapshot, query, where, orderBy, serverTimestamp, doc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
-
-    const firebaseConfig = {
-      apiKey: "AIzaSyDFWCyeoF-lGG2z7wpXCuLOZkO0TaYw1-M",
-      authDomain: "one-summit-discussion-board.firebaseapp.com",
-      projectId: "one-summit-discussion-board",
-      storageBucket: "one-summit-discussion-board.firebasestorage.app",
-      messagingSenderId: "595878395925",
-      appId: "1:595878395925:web:d55da77e2c0e6a1bbb4e1c"
-    };
-
-    const app = initializeApp(firebaseConfig);
-    const auth = getAuth(app);
-    const db = getFirestore(app);
-
-    let currentUid = null;
-    await signInAnonymously(auth);
-    onAuthStateChanged(auth, (user)=>{ currentUid = user?.uid || null; });
-
+  <script>
+  (function(){
+    const ns = 'discussionBoard:' + (location.host || 'local');
     const $ = (sel, el=document) => el.querySelector(sel);
     const $$ = (sel, el=document) => Array.from(el.querySelectorAll(sel));
+    const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-    let state = { topics: [], subtopics: [], posts: [] };
-    let current = { topicId: null, subtopicId: null };
+    const store = {
+      key: ns,
+      load(){
+        try{ return JSON.parse(localStorage.getItem(this.key)) || {topics:[], subtopics:[], posts:[]}; }
+        catch(e){ return {topics:[], subtopics:[], posts:[]}; }
+      },
+      save(data){ localStorage.setItem(this.key, JSON.stringify(data)); },
+      reset(){ localStorage.removeItem(this.key); }
+    };
 
+    let state = store.load();
+    let current = { topicId:null, subtopicId:null };
+
+    // UI helpers
     function modal(title, contentNode){
       $('#modalTitle').textContent = title;
       const body = $('#modalBody');
@@ -188,43 +209,10 @@
       n.style.border='1px solid var(--line)';n.style.padding='10px 12px';n.style.borderRadius='12px';
       n.style.boxShadow='0 12px 30px #0006';n.style.zIndex='9999';
       document.body.appendChild(n);
-      setTimeout(()=>n.remove(), 1600);
+      setTimeout(()=>n.remove(), 1800);
     }
 
-    let unsubscribeTopics = null;
-    let unsubscribeSubtopics = null;
-    let unsubscribePosts = null;
-
-    function watchTopics(){
-      if (unsubscribeTopics) unsubscribeTopics();
-      const q = query(collection(db, 'topics'), orderBy('createdAt', 'desc'));
-      unsubscribeTopics = onSnapshot(q, (snap)=>{
-        state.topics = snap.docs.map(d=> ({ id: d.id, ...d.data() }));
-        renderTopics();
-        renderSubtopics();
-      });
-    }
-
-    function watchSubtopics(topicId){
-      if (unsubscribeSubtopics) unsubscribeSubtopics();
-      if (!topicId){ state.subtopics = []; renderSubtopics(); return; }
-      const q = query(collection(db, 'subtopics'), where('topicId','==', topicId), orderBy('createdAt', 'desc'));
-      unsubscribeSubtopics = onSnapshot(q, (snap)=>{
-        state.subtopics = snap.docs.map(d=> ({ id: d.id, ...d.data() }));
-        renderSubtopics();
-      });
-    }
-
-    function watchPosts(subtopicId){
-      if (unsubscribePosts) unsubscribePosts();
-      if (!subtopicId){ state.posts = []; renderThreads(); return; }
-      const q = query(collection(db, 'posts'), where('subtopicId','==', subtopicId), orderBy('createdAt', 'desc'));
-      unsubscribePosts = onSnapshot(q, (snap)=>{
-        state.posts = snap.docs.map(d=> ({ id: d.id, ...d.data() }));
-        renderThreads();
-      });
-    }
-
+    // Renderers
     function renderTopics(){
       const list = $('#topicsList');
       list.innerHTML = '';
@@ -233,14 +221,10 @@
       state.topics.forEach(t=>{
         const el = tpl.content.firstElementChild.cloneNode(true);
         $('h4', el).textContent = t.title;
-        $('.meta', el).textContent = t.createdAt?.toDate ? `Created ${t.createdAt.toDate().toLocaleDateString()}` : '';
+        const subCount = state.subtopics.filter(s=>s.topicId===t.id).length;
+        $('.meta', el).textContent = subCount + ' subtopic' + (subCount!==1?'s':'');
         if(current.topicId===t.id) el.classList.add('active');
-        el.addEventListener('click', ()=>{
-          current.topicId = t.id; current.subtopicId = null;
-          watchSubtopics(current.topicId);
-          watchPosts(null);
-          render();
-        });
+        el.addEventListener('click', ()=>{ current.topicId=t.id; current.subtopicId=null; render(); });
         list.appendChild(el);
       });
     }
@@ -252,15 +236,16 @@
       const topic = state.topics.find(t=>t.id===current.topicId);
       pill.textContent = topic ? topic.title : 'None';
       if(!topic){ list.innerHTML = '<div class="empty">Select a topic.</div>'; return; }
-      const subs = state.subtopics;
+      const subs = state.subtopics.filter(s=>s.topicId===topic.id);
       if(subs.length===0){ list.innerHTML = '<div class="empty">No subtopics yet.</div>'; return; }
       const tpl = $('#subtopicItemTpl');
       subs.forEach(s=>{
         const el = tpl.content.firstElementChild.cloneNode(true);
         $('h4', el).textContent = s.title;
-        $('.meta', el).textContent = s.createdAt?.toDate ? `Created ${s.createdAt.toDate().toLocaleDateString()}` : '';
+        const threadCount = state.posts.filter(p=>p.subtopicId===s.id && !p.parentPostId).length;
+        $('.meta', el).textContent = threadCount + ' thread' + (threadCount!==1?'s':'');
         if(current.subtopicId===s.id) el.classList.add('active');
-        el.addEventListener('click', ()=>{ current.subtopicId=s.id; watchPosts(current.subtopicId); renderThreads(); });
+        el.addEventListener('click', ()=>{ current.subtopicId=s.id; renderThreads(); });
         list.appendChild(el);
       });
     }
@@ -273,31 +258,202 @@
       pill.textContent = sub ? sub.title : 'None';
       if(!sub){ body.innerHTML = '<div class="empty">Pick a subtopic to view or start a thread.</div>'; return; }
 
-      const roots = state.posts.filter(p=>!p.parentPostId);
+      const roots = state.posts
+        .filter(p=>p.subtopicId===sub.id && !p.parentPostId)
+        .sort((a,b)=>b.createdAt - a.createdAt);
+
       if(roots.length===0){ body.innerHTML = '<div class="empty">No threads yet. Start one!</div>'; return; }
 
-      const tpl = $('#postTpl');
       roots.forEach(root=>{
-        const rootEl = renderPost(tpl, root);
+        const rootEl = renderPost(root, false);
         body.appendChild(rootEl);
-        const replies = state.posts.filter(p=>p.parentPostId===root.id).sort((a,b)=>{
-          const ad = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : 0;
-          const bd = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : 0;
-          return ad - bd;
-        });
+        const replies = state.posts
+          .filter(p=>p.parentPostId===root.id)
+          .sort((a,b)=>a.createdAt - b.createdAt);
         replies.forEach(r=>{
-          const el = renderPost(tpl, r);
+          const el = renderPost(r, true);
           el.classList.add('reply');
           body.appendChild(el);
         });
       });
     }
 
-    function renderPost(tpl, post){
+    function renderPost(post){
+      const tpl = $('#postTpl');
       const el = tpl.content.firstElementChild.cloneNode(true);
       $('.title', el).textContent = post.title || '(no title)';
-      $('.content', el).textContent = post.content || '';
-      const when = post.createdAt?.toDate ? post.createdAt.toDate().toLocaleString() : '';
-      const whoText = `${post.firstName||''} ${post.lastName||''} • ${post.city||''}${post.state?`, ${post.state}`:''} ${when?`• ${when}`:''}`.trim();
-      const mail = document.createElement('a'); mail.href = `mailto:${post.email||''}`; mail.textContent = post.email||'';
-      const meta = document.createElement('div'); meta.className='author'; meta.textContent = whoText + (post.email? ' • ' : ''); if(post.email
+      $('.content', el).textContent = post.content;
+      const who = `${post.firstName} ${post.lastName} • ${post.city}, ${post.state} • ${new Date(post.createdAt).toLocaleString()}`;
+      const mail = document.createElement('a'); mail.href = `mailto:${post.email}`; mail.textContent = post.email;
+      const meta = document.createElement('div'); meta.className='author'; meta.textContent = who + ' • ';
+      meta.appendChild(mail);
+      $('.author', el).replaceWith(meta);
+
+      $('.replyBtn', el).addEventListener('click', ()=> openReplyForm(post));
+      $('.delBtn', el).addEventListener('click', ()=> deletePost(post));
+
+      return el;
+    }
+
+    // Forms
+    function topicForm(){
+      const f = document.createElement('form');
+      f.innerHTML = `
+        <div>
+          <label>Topic title *</label>
+          <input name="title" placeholder="e.g., Marketing Strategies" required />
+        </div>
+        <div class="row" style="justify-content:flex-end">
+          <button type="button" class="btn ghost">Cancel</button>
+          <button class="btn">Create Topic</button>
+        </div>`;
+      $('button[type="button"]', f).onclick = closeModal;
+      f.onsubmit = (e)=>{
+        e.preventDefault();
+        const title = f.title.value.trim();
+        if(!title) return;
+        const t = { id: uid(), title, createdAt: Date.now() };
+        state.topics.push(t); store.save(state);
+        current.topicId = t.id; current.subtopicId = null;
+        render(); closeModal(); notify('Topic created');
+      };
+      return f;
+    }
+
+    function subtopicForm(){
+      const topic = state.topics.find(t=>t.id===current.topicId);
+      const f = document.createElement('form');
+      f.innerHTML = `
+        <div class="help">Under topic: <strong>${topic?topic.title:'(none)'}</strong></div>
+        <div>
+          <label>Subtopic title *</label>
+          <input name="title" placeholder="e.g., SEO" required />
+        </div>
+        <div class="row" style="justify-content:flex-end">
+          <button type="button" class="btn ghost">Cancel</button>
+          <button class="btn">Create Subtopic</button>
+        </div>`;
+      $('button[type="button"]', f).onclick = closeModal;
+      f.onsubmit = (e)=>{
+        e.preventDefault();
+        if(!current.topicId){ alert('Choose a topic first.'); return; }
+        const title = f.title.value.trim(); if(!title) return;
+        const s = { id: uid(), topicId: current.topicId, title, createdAt: Date.now() };
+        state.subtopics.push(s); store.save(state);
+        current.subtopicId = s.id;
+        render(); closeModal(); notify('Subtopic created');
+      };
+      return f;
+    }
+
+    function threadForm(prefill={}){
+      const f = document.createElement('form');
+      f.innerHTML = `
+        <div class="two">
+          <div><label>First name *</label><input name="firstName" required value="${prefill.firstName||''}"/></div>
+          <div><label>Last name *</label><input name="lastName" required value="${prefill.lastName||''}"/></div>
+        </div>
+        <div class="two">
+          <div><label>City *</label><input name="city" required value="${prefill.city||''}"/></div>
+          <div><label>State *</label><input name="state" required value="${prefill.state||''}"/></div>
+        </div>
+        <div><label>Email *</label><input name="email" type="email" required value="${prefill.email||''}"/></div>
+        <div><label>Thread title *</label><input name="title" required placeholder="e.g., Best lead gen tactics"/></div>
+        <div><label>Message *</label><textarea name="content" required placeholder="Start the discussion..."></textarea></div>
+        <div class="row" style="justify-content:flex-end">
+          <button type="button" class="btn ghost">Cancel</button>
+          <button class="btn">Post Thread</button>
+        </div>`;
+      $('button[type="button"]', f).onclick = closeModal;
+      f.onsubmit = (e)=>{
+        e.preventDefault();
+        if(!current.subtopicId){ alert('Choose a subtopic first.'); return; }
+        const data = Object.fromEntries(new FormData(f).entries());
+        if(!data.email.includes('@')){ alert('Please enter a valid email.'); return; }
+        const post = { id: uid(), subtopicId: current.subtopicId, parentPostId:null, title:data.title.trim(), content:data.content.trim(),
+          firstName:data.firstName.trim(), lastName:data.lastName.trim(), city:data.city.trim(), state:data.state.trim(), email:data.email.trim(), createdAt: Date.now() };
+        state.posts.push(post); store.save(state);
+        renderThreads(); closeModal(); notify('Thread posted');
+      };
+      return f;
+    }
+
+    function replyForm(rootPost){
+      const f = document.createElement('form');
+      f.innerHTML = `
+        <div class="help">Replying to: <strong>${rootPost.title || '(no title)'}</strong></div>
+        <div class="two">
+          <div><label>First name *</label><input name="firstName" required/></div>
+          <div><label>Last name *</label><input name="lastName" required/></div>
+        </div>
+        <div class="two">
+          <div><label>City *</label><input name="city" required/></div>
+          <div><label>State *</label><input name="state" required/></div>
+        </div>
+        <div><label>Email *</label><input name="email" type="email" required/></div>
+        <div><label>Reply *</label><textarea name="content" required placeholder="Write your reply..."></textarea></div>
+        <div class="row" style="justify-content:flex-end">
+          <button type="button" class="btn ghost">Cancel</button>
+          <button class="btn">Post Reply</button>
+        </div>`;
+      $('button[type="button"]', f).onclick = closeModal;
+      f.onsubmit = (e)=>{
+        e.preventDefault();
+        const data = Object.fromEntries(new FormData(f).entries());
+        if(!data.email.includes('@')){ alert('Please enter a valid email.'); return; }
+        const post = { id: uid(), subtopicId: rootPost.subtopicId, parentPostId: rootPost.id, title: 'Re: ' + (rootPost.title || '(no title)'), content:data.content.trim(),
+          firstName:data.firstName.trim(), lastName:data.lastName.trim(), city:data.city.trim(), state:data.state.trim(), email:data.email.trim(), createdAt: Date.now() };
+        state.posts.push(post); store.save(state);
+        renderThreads(); closeModal(); notify('Reply posted');
+      };
+      return f;
+    }
+
+    function openReplyForm(rootPost){ modal('Reply', replyForm(rootPost)); }
+
+    function deletePost(post){
+      if(!confirm('Delete this post? Replies (if any) will also be removed.')) return;
+      // remove post and any replies to it (if root)
+      const isRoot = !post.parentPostId;
+      state.posts = state.posts.filter(p=> p.id!==post.id && (!isRoot || p.parentPostId!==post.id));
+      store.save(state); renderThreads(); notify('Deleted');
+    }
+
+    // Export / Import / Reset
+    $('#exportBtn').addEventListener('click', ()=>{
+      const blob = new Blob([JSON.stringify(state, null, 2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url; a.download = 'discussion-board-export.json'; a.click();
+      setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    });
+    $('#importInput').addEventListener('change', async (e)=>{
+      const file = e.target.files[0]; if(!file) return;
+      try{ const text = await file.text(); const data = JSON.parse(text);
+        if(!data.topics || !data.subtopics || !data.posts) throw new Error('Invalid file');
+        state = data; store.save(state); render(); notify('Import complete');
+      }catch(err){ alert('Import failed: ' + err.message); }
+      e.target.value = '';
+    });
+    $('#resetBtn').addEventListener('click', ()=>{
+      if(confirm('This will clear all local data for this board on this domain. Continue?')){
+        store.reset(); state = store.load(); current={topicId:null, subtopicId:null}; render(); notify('Board reset');
+      }
+    });
+
+    // Button wiring
+    $('#addTopicBtn').addEventListener('click', ()=> modal('New Topic', topicForm()));
+    $('#addSubtopicBtn').addEventListener('click', ()=>{
+      if(!current.topicId){ alert('Choose a topic first.'); return; }
+      modal('New Subtopic', subtopicForm());
+    });
+    $('#newThreadBtn').addEventListener('click', ()=>{
+      if(!current.subtopicId){ alert('Choose a subtopic first.'); return; }
+      modal('Start New Thread', threadForm());
+    });
+
+    function render(){ renderTopics(); renderSubtopics(); renderThreads(); }
+    render();
+  })();
+  </script>
+</body>
+</html>
